@@ -1,0 +1,82 @@
+name: Build personal clock test APK 3
+
+on:
+  push:
+    branches: [build/clock-test-apk-3]
+    paths-ignore: [.github/signing-key-v3.enc]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require a new test release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view clock-warning-test-3 --json assets --jq '.assets[].name' 2>/dev/null | rg -qx 'Sente-kloktest-3.apk'; then
+            echo '::error::This build has already published its APK.'
+            exit 1
+          fi
+      - name: Prepare encrypted signing handoff
+        run: openssl req -x509 -newkey rsa:4096 -nodes -keyout "$RUNNER_TEMP/handoff-private.pem" -out "$RUNNER_TEMP/handoff.crt" -days 1 -subj '/CN=Sente temporary signing handoff' >/dev/null 2>&1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signing-handoff-3
+          path: ${{ runner.temp }}/handoff.crt
+          retention-days: 1
+      - name: Restore existing test signing key
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in $(seq 1 60); do
+            if gh api "repos/$GITHUB_REPOSITORY/contents/.github/signing-key-v3.enc?ref=build/clock-test-apk-3" --jq .content > "$RUNNER_TEMP/signing-input.b64" 2>/dev/null; then
+              base64 --decode "$RUNNER_TEMP/signing-input.b64" > "$RUNNER_TEMP/signing-input.enc"
+              break
+            fi
+            sleep 10
+          done
+          test -s "$RUNNER_TEMP/signing-input.enc"
+          openssl cms -decrypt -binary -inform DER -in "$RUNNER_TEMP/signing-input.enc" -recip "$RUNNER_TEMP/handoff.crt" -inkey "$RUNNER_TEMP/handoff-private.pem" -out "$RUNNER_TEMP/sente-test.jks"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Verify existing signing certificate
+        run: |
+          keytool -exportcert -keystore "$RUNNER_TEMP/sente-test.jks" -storepass android -alias androiddebugkey -rfc -file "$RUNNER_TEMP/signer.pem"
+          signing_digest="$(openssl x509 -in "$RUNNER_TEMP/signer.pem" -outform DER | sha256sum | cut -d ' ' -f 1)"
+          test "$signing_digest" = 276e2ea618ebe8a4a7389bdba2ddf2389068e2e27e76ae05892dfd1f7ee34595
+      - name: Add Android SDK tools to PATH
+        run: echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+      - name: Accept Android SDK licenses
+        run: python3 -c "import subprocess; subprocess.run(['sdkmanager', '--licenses'], input='y\n' * 1000, text=True, stdout=subprocess.DEVNULL, check=True)"
+      - name: Install Android build tools
+        run: sdkmanager 'platforms;android-37.1' 'build-tools;36.0.0' 'ndk;25.1.8937393' 'cmake;3.31.6'
+      - name: Configure personal test build
+        run: |
+          cat > "$RUNNER_TEMP/signing.gradle" <<'GRADLE'
+          gradle.afterProject { p ->
+            if (p.path == ':app') {
+              p.android.signingConfigs.debug.storeFile = new File(System.getenv('RUNNER_TEMP') + '/sente-test.jks')
+              p.android.defaultConfig.versionCode = 44
+              p.android.buildTypes.debug.versionNameSuffix = '-clock-test-3'
+            }
+          }
+          GRADLE
+      - name: Test and build APK
+        run: ./gradlew :shared:testAndroidHostTest :app:testDebugUnitTest :app:assembleDebug --init-script "$RUNNER_TEMP/signing.gradle" --no-configuration-cache --max-workers=2
+      - name: Publish test APK on this fork
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/Sente-kloktest-3.apk"
+          gh release create clock-warning-test-3 "$RUNNER_TEMP/Sente-kloktest-3.apk" --target feature/timeout-warning --prerelease --latest=false --title 'Sente kloktest 3 — goedgekeurd tikgeluid' --notes-file .github/clock-test-release-3.md
+      - name: Remove temporary signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/handoff-private.pem" "$RUNNER_TEMP/sente-test.jks"
