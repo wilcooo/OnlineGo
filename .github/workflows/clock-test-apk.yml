@@ -26,6 +26,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - name: Add Android SDK tools to PATH
+        run: echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
       - name: Accept Android SDK licenses
         run: python3 -c "import subprocess; subprocess.run(['sdkmanager', '--licenses'], input='y\n' * 1000, text=True, stdout=subprocess.DEVNULL, check=True)"
       - name: Install Android build tools
