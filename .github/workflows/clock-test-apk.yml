@@ -1,0 +1,56 @@
+name: Build personal clock test APK
+
+on:
+  push:
+    branches: [build/clock-test-apk]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require a new test release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view clock-warning-test-1 --json assets --jq '.assets[].name' 2>/dev/null | rg -qx 'Sente-kloktest.apk'; then
+            echo '::error::This one-off build has already published its APK.'
+            exit 1
+          fi
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android build tools
+        run: sdkmanager 'platforms;android-37.1' 'build-tools;36.0.0' 'ndk;25.1.8937393' 'cmake;3.31.6'
+      - name: Prepare personal test signing
+        run: |
+          keytool -genkeypair -keystore "$RUNNER_TEMP/sente-test.jks" -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname 'CN=Sente personal test, O=Android, C=NL'
+          cat > "$RUNNER_TEMP/signing.gradle" <<'GRADLE'
+          gradle.afterProject { p ->
+            if (p.path == ':app') {
+              p.android.signingConfigs.debug.storeFile = new File(System.getenv('RUNNER_TEMP') + '/sente-test.jks')
+            }
+          }
+          GRADLE
+      - name: Test and build APK
+        run: ./gradlew :shared:testAndroidHostTest :app:testDebugUnitTest :app:assembleDebug --init-script "$RUNNER_TEMP/signing.gradle" --no-configuration-cache --max-workers=2
+      - name: Encrypt signing key for recovery
+        run: openssl cms -encrypt -binary -aes-256-cbc -in "$RUNNER_TEMP/sente-test.jks" -out "$RUNNER_TEMP/signing-key.enc" -outform DER .github/signing-recovery.crt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sente-signing-recovery
+          path: ${{ runner.temp }}/signing-key.enc
+          retention-days: 7
+      - name: Publish test APK on this fork
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/Sente-kloktest.apk"
+          gh release create clock-warning-test-1 "$RUNNER_TEMP/Sente-kloktest.apk" --target feature/timeout-warning --prerelease --latest=false --title 'Sente kloktest 1' --notes-file .github/clock-test-release.md
